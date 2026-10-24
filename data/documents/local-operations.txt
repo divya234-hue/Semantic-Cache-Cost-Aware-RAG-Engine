@@ -1,0 +1,5 @@
+The baseline service uses a locally stored Sentence Transformers model to embed questions and document chunks. The model is downloaded the first time it is needed and can then be loaded from the local model cache.
+
+Qdrant local mode stores vectors on disk without requiring a separate server. It is suitable for a single-process development project. Multiple application workers should not open the same local Qdrant directory; a deployed multi-process service should use a Qdrant server instead.
+
+The starter answer provider is extractive: it returns matching sentences from retrieved text and does not call or imitate a generative language model. This keeps the basic project usable without a paid model API, while making the distinction between retrieval and generation explicit.

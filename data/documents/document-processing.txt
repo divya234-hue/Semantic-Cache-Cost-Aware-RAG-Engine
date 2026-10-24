@@ -1,0 +1,5 @@
+Document ingestion reads source files, extracts their text, divides long text into overlapping chunks, and attaches metadata. Useful metadata includes a stable document identifier, a chunk identifier, the relative source path, and a version for the corpus.
+
+TXT files can be read as UTF-8 text. PDF files can contain selectable text, but scanned image-only PDFs require OCR and are not readable by a basic text extractor. Chunk overlap helps preserve context near boundaries, while excessively large chunks can reduce retrieval precision.
+
+An ingestion run should be reproducible: process files in a stable order, use configurable chunk settings, and report how many documents and chunks were indexed. Source files should remain in the documents directory and should not be treated as executable input.

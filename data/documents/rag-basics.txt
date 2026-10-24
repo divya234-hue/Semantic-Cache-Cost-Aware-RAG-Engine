@@ -1,0 +1,5 @@
+Retrieval-Augmented Generation (RAG) combines document retrieval with language generation. A retriever finds relevant passages in a document collection, and a generator uses those passages as context for an answer.
+
+An embedding model converts text into numeric vectors. Similar meanings can have nearby vectors even when they use different words. A vector database stores document-chunk vectors and searches for the nearest vectors to a question.
+
+Grounded answers should be supported by retrieved evidence. A citation should identify the source document and the specific chunk that contributed evidence. When the documents do not support an answer, the system should say that evidence is insufficient instead of guessing.
