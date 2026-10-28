@@ -206,4 +206,4 @@ python scripts/verify_env.py
 - **Deployment tooling:** no Docker/Compose files, production frontend auth flow, shared rate limiter, centralized logging/monitoring, automated backups, or disaster-recovery setup is provided.
 - **Legacy vector data:** vectors created before tenant/corpus scoping may not be recognized by the current scoped retrieval flow. Back up existing data and re-index through the current application as appropriate; no automatic legacy migration is provided.
 
-Before any public deployment, integrate and test a trusted identity provider, use TLS and a hardened reverse proxy, configure remote Qdrant and appropriate persistent storage, add shared rate limiting and monitoring, establish backups/retention policies, review provider data handling, and conduct an independent security and operational review.
+
