@@ -1,11 +1,16 @@
-import { AlertCircle, CheckCircle2, FileText } from 'lucide-react'
+import { AlertCircle, Check, CheckCircle2, Copy, FileText } from 'lucide-react'
+import { lazy, Suspense } from 'react'
 import type { AskResponse } from '../api'
+
+const MarkdownAnswer = lazy(() => import('./MarkdownAnswer'))
 
 interface AnswerCardProps {
   result: AskResponse
+  onCopy?: () => void
+  copied?: boolean
 }
 
-export function AnswerCard({ result }: AnswerCardProps) {
+export function AnswerCard({ result, onCopy, copied = false }: AnswerCardProps) {
   const supported = result.status === 'supported'
 
   return (
@@ -19,7 +24,23 @@ export function AnswerCard({ result }: AnswerCardProps) {
           {result.cache_hit ? ' · semantic cache' : ''}
         </span>
       </div>
-      <p className="answer-card__text">{result.answer}</p>
+      <div className="answer-card__body">
+        <div className="answer-card__text">
+          <Suspense fallback={<p className="markdown-loading">Rendering answer…</p>}>
+            <MarkdownAnswer answer={result.answer} />
+          </Suspense>
+        </div>
+        {onCopy && (
+          <button
+            className="button button--secondary button--copy"
+            type="button"
+            onClick={onCopy}
+          >
+            {copied ? <Check size={15} /> : <Copy size={15} />}
+            {copied ? 'Copied' : 'Copy answer'}
+          </button>
+        )}
+      </div>
       <p className="answer-card__metadata">
         Route · {result.route}
         {result.escalated ? ' · escalated' : ''}

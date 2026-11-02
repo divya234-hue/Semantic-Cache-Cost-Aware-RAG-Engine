@@ -2,6 +2,14 @@
 
 This React + TypeScript app is a local-development interface for the FastAPI backend. It uses the backend's existing document, ingestion, ask, metrics, settings, cache-statistics, and readiness endpoints.
 
+## Workspace features
+
+- Overview cards use document, indexing, request, and cache metrics returned by the API. Recent activity is explicitly limited to actions in the current browser session.
+- The Documents view supports PDF/TXT drag-and-drop or file selection, upload progress, search, type filtering, deletion, and corpus re-indexing. Uploads are indexed after the backend accepts the file.
+- Ask your corpus supports an in-tab conversation, Markdown answers with fenced-code syntax highlighting, citations, response copying, clearing, and retrying failed requests. The backend provides one answer per request; it does not provide streaming or conversation persistence.
+- System & settings shows backend-reported metrics and read-only configuration. The backend readiness endpoint provides a combined readiness check; it does not expose separate live embedding- or provider-connectivity checks.
+- Light and dark themes follow the system preference initially and can be changed from the top bar. The selection is saved in browser local storage.
+
 ## Run locally
 
 1. Start the FastAPI backend from the repository root on `http://127.0.0.1:8000`.

@@ -11,7 +11,8 @@ A local-development Retrieval-Augmented Generation (RAG) application with a Fast
 - Ask questions against the indexed corpus and return an answer status, citations, and retrieval scores.
 - Cache answers semantically in Qdrant, scoped by tenant and corpus version, with a similarity threshold and TTL.
 - Use local extractive answering by default, or configure an optional provider adapter and confidence-based escalation.
-- View documents, cache statistics, settings, and bounded operational metrics in the React interface.
+- Use the React workspace dashboard, document search/upload/delete/re-index tools, and a Markdown-enabled RAG chat with citations.
+- Review backend-reported readiness, cache health, provider and embedding configuration, and bounded operational metrics; switch between light and dark themes.
 - Run isolated automated tests using temporary corpus, Qdrant, and SQLite paths.
 
 ## Architecture
@@ -205,5 +206,4 @@ python scripts/verify_env.py
 - **Document safety:** no antivirus scanning, malware detection, PDF sandbox, OCR for scanned PDFs, or formal document-retention workflow is included.
 - **Deployment tooling:** no Docker/Compose files, production frontend auth flow, shared rate limiter, centralized logging/monitoring, automated backups, or disaster-recovery setup is provided.
 - **Legacy vector data:** vectors created before tenant/corpus scoping may not be recognized by the current scoped retrieval flow. Back up existing data and re-index through the current application as appropriate; no automatic legacy migration is provided.
-
 

@@ -20,6 +20,11 @@ export interface DocumentUploadResponse {
   message: string
 }
 
+export interface DocumentDeleteResponse {
+  filename: string
+  message: string
+}
+
 export interface IngestResponse {
   documents_ingested: number
   chunks_indexed: number
@@ -114,10 +119,26 @@ export const ragApi = {
   async listDocuments(): Promise<DocumentListResponse> {
     return (await client.get<DocumentListResponse>('/api/v1/documents')).data
   },
-  async uploadDocument(file: File): Promise<DocumentUploadResponse> {
+  async uploadDocument(
+    file: File,
+    onProgress?: (progress: number | null) => void,
+  ): Promise<DocumentUploadResponse> {
     const body = new FormData()
     body.append('file', file)
-    return (await client.post<DocumentUploadResponse>('/api/v1/documents/upload', body)).data
+    return (
+      await client.post<DocumentUploadResponse>('/api/v1/documents/upload', body, {
+        onUploadProgress: (event) => {
+          onProgress?.(event.total ? Math.round((event.loaded / event.total) * 100) : null)
+        },
+      })
+    ).data
+  },
+  async deleteDocument(filename: string): Promise<DocumentDeleteResponse> {
+    return (
+      await client.delete<DocumentDeleteResponse>(
+        `/api/v1/documents/${encodeURIComponent(filename)}`,
+      )
+    ).data
   },
   async ingestDocuments(): Promise<IngestResponse> {
     return (await client.post<IngestResponse>('/api/v1/ingest')).data
