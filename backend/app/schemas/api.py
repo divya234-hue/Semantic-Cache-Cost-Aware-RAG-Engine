@@ -54,6 +54,7 @@ class DocumentInfo(BaseModel):
     size_bytes: int
     extension: str
     modified_at: str
+    can_edit: bool = True
 
 
 class DocumentListResponse(BaseModel):

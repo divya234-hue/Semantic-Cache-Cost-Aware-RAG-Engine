@@ -43,6 +43,7 @@ def test_production_requires_auth_and_remote_qdrant() -> None:
     settings = Settings(
         _env_file=None,
         APP_ENV="production",
+        AUTHENTICATION_REQUIRED=True,
         REQUIRE_TENANT_AUTH=True,
         AUTH_SECRET_KEY="a" * 40,
         QDRANT_USE_LOCAL_STORAGE=False,

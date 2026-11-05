@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import logging
 import threading
 import weakref
@@ -62,6 +63,7 @@ class VectorStore(Protocol):
         limit: int,
         tenant_id: str = "tenant-default",
         corpus_version: str | None = None,
+        allowed_document_ids: Sequence[str] | None = None,
     ) -> list[RetrievedChunk]: ...
 
 
@@ -108,6 +110,14 @@ class RagService:
         self._invalidated_tenants: set[str] = set()
         self._indexed_document_counts: dict[str, tuple[str, int]] = {}
 
+    @staticmethod
+    def _accepts_keyword(function, keyword: str) -> bool:
+        parameters = inspect.signature(function).parameters.values()
+        return any(
+            parameter.name == keyword or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
     @contextmanager
     def tenant_corpus_lock(self, tenant_id: str) -> Iterator[None]:
         with self._tenant_locks_guard:
@@ -152,11 +162,27 @@ class RagService:
         query: str,
         top_k: int,
         tenant_id: str = "tenant-default",
+        *,
+        allowed_document_ids: Sequence[str] | None = None,
+        permission_scope: str = "tenant-default",
     ) -> dict[str, object]:
         with self.tenant_corpus_lock(tenant_id):
-            return self._ask_locked(query, top_k, tenant_id)
+            return self._ask_locked(
+                query,
+                top_k,
+                tenant_id,
+                allowed_document_ids,
+                permission_scope,
+            )
 
-    def _ask_locked(self, query: str, top_k: int, tenant_id: str) -> dict[str, object]:
+    def _ask_locked(
+        self,
+        query: str,
+        top_k: int,
+        tenant_id: str,
+        allowed_document_ids: Sequence[str] | None,
+        permission_scope: str,
+    ) -> dict[str, object]:
         corpus_invalidated = tenant_id in self._invalidated_tenants
         if corpus_invalidated:
             return {
@@ -179,8 +205,17 @@ class RagService:
         cache_write = getattr(self.vector_store, "upsert_cache", None)
         if self.semantic_cache_enabled and current_version and cache_lookup is not None:
             try:
+                cache_kwargs = (
+                    {"permission_scope": permission_scope}
+                    if self._accepts_keyword(cache_lookup, "permission_scope")
+                    else {}
+                )
                 cached = cache_lookup(
-                    query_vector, tenant_id, current_version, self.cache_threshold
+                    query_vector,
+                    tenant_id,
+                    current_version,
+                    self.cache_threshold,
+                    **cache_kwargs,
                 )
             except _CACHE_ERRORS as exc:
                 logger.warning(
@@ -198,11 +233,16 @@ class RagService:
                         "output_tokens": 0,
                     }
 
+        search_kwargs = {
+            "tenant_id": tenant_id,
+            "corpus_version": current_version,
+        }
+        if self._accepts_keyword(self.vector_store.search, "allowed_document_ids"):
+            search_kwargs["allowed_document_ids"] = allowed_document_ids
         retrieved = self.vector_store.search(
             query_vector,
             top_k,
-            tenant_id=tenant_id,
-            corpus_version=current_version,
+            **search_kwargs,
         )
         eligible = [chunk for chunk in retrieved if chunk.score >= self.min_retrieval_score]
         answer_result = self.answer_provider.generate(query, eligible) if eligible else None
@@ -219,7 +259,14 @@ class RagService:
                 "input_tokens": 0,
                 "output_tokens": 0,
             }
-            return self._cache_result(result, query_vector, tenant_id, current_version, cache_write)
+            return self._cache_result(
+                result,
+                query_vector,
+                tenant_id,
+                current_version,
+                cache_write,
+                permission_scope,
+            )
 
         citations = [
             {
@@ -272,7 +319,14 @@ class RagService:
                 "input_tokens": answer_result.input_tokens,
                 "output_tokens": answer_result.output_tokens,
             }
-        return self._cache_result(result, query_vector, tenant_id, current_version, cache_write)
+        return self._cache_result(
+            result,
+            query_vector,
+            tenant_id,
+            current_version,
+            cache_write,
+            permission_scope,
+        )
 
     def invalidate_tenant(self, tenant_id: str) -> None:
         with self.tenant_corpus_lock(tenant_id):
@@ -320,6 +374,7 @@ class RagService:
         tenant_id: str,
         corpus_version: str | None,
         cache_write,
+        permission_scope: str,
     ) -> dict[str, object]:
         if not self.semantic_cache_enabled or not corpus_version or cache_write is None:
             return result
@@ -330,6 +385,11 @@ class RagService:
                 tenant_id,
                 corpus_version,
                 self.cache_ttl_seconds,
+                **(
+                    {"permission_scope": permission_scope}
+                    if self._accepts_keyword(cache_write, "permission_scope")
+                    else {}
+                ),
             )
         except _CACHE_ERRORS as exc:
             logger.warning("Semantic cache write unavailable (%s).", type(exc).__name__)

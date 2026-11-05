@@ -18,11 +18,13 @@ A local-development Retrieval-Augmented Generation (RAG) application with a Fast
 ## Architecture
 
 ```text
-React + TypeScript (Vite)
+React + TypeScript (Vite, cookie-based authentication)
           |
           | /api, /health, /ready
           v
 FastAPI
+  |-- Argon2 user authentication, short-lived JWT access, rotating refresh sessions
+  |-- tenant-aware roles, document grants, CSRF protection, security audit events
   |-- document validation, parsing, chunking
   |-- Sentence Transformers embeddings
   |-- Qdrant document retrieval and semantic cache
@@ -30,7 +32,7 @@ FastAPI
   `-- bounded SQLite request metrics
 ```
 
-In local development, the Vite server proxies API and health requests to `http://127.0.0.1:8000`. The frontend does not contain secrets and does not provide a login or bearer-token management screen.
+In local development, the Vite server proxies API and health requests to `http://127.0.0.1:8000`. Browser authentication uses HttpOnly cookies; access and refresh tokens are not returned in JSON or stored in `localStorage`.
 
 ## Requirements
 
@@ -53,7 +55,17 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-The example configuration uses development mode, local Qdrant storage, the local extractive answer provider, and a single default tenant without API authentication. This is convenient for a local demo only; **do not expose this configuration to an untrusted network**. Keep `.env` private and do not commit it.
+The example configuration enables built-in authentication with local Qdrant storage and the local extractive answer provider. Before starting the app, set a private signing key and apply the database migration:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Copy the generated value into AUTH_SECRET_KEY in .env; never commit it.
+# If DATABASE_URL differs from alembic.ini, set it in this shell before migrating:
+# $env:DATABASE_URL = "sqlite:///./data/metrics.db"
+alembic upgrade head
+```
+
+Keep `.env` private. `AUTHENTICATION_REQUIRED=true` requires an `AUTH_SECRET_KEY` of at least 32 characters. For production, configure HTTPS, secure origins, a remote HTTPS Qdrant service, and a managed secrets store; the local example must not be exposed to an untrusted network.
 
 Start the backend bound to loopback:
 
@@ -73,7 +85,7 @@ npm ci
 npm run dev
 ```
 
-Open the local URL printed by Vite (normally `http://localhost:5173`). The development proxy forwards `/api`, `/health`, and `/ready` to the backend. The UI is intended for the unauthenticated local-development configuration. It cannot call a backend that requires bearer-token authentication.
+Open the local URL printed by Vite (normally `http://localhost:5173`). The development proxy forwards `/api`, `/auth`, `/health`, and `/ready` to the backend. Register to create a tenant and its first ADMIN account, then sign in.
 
 ### 3. Try the RAG workflow
 
@@ -89,17 +101,48 @@ The API is also available at `http://127.0.0.1:8000/docs` while running locally.
 |---|---|---|
 | `GET` | `/health` | Liveness check |
 | `GET` | `/ready` | Readiness/configuration check |
-| `GET` | `/api/v1/documents` | List the current tenant's documents |
-| `POST` | `/api/v1/documents/upload` | Upload a document as multipart field `file` |
-| `DELETE` | `/api/v1/documents/{filename}` | Delete a tenant document and invalidate its index/cache |
-| `POST` | `/api/v1/ingest` | Parse, chunk, embed, and index the tenant corpus |
-| `POST` | `/api/v1/ask` | Ask a question, e.g. `{"query":"What does the document explain?","top_k":5}` |
+| `POST` | `/auth/register` | Register a new tenant and its first ADMIN account |
+| `POST` | `/auth/login` | OAuth2 password-form login (`username`, `password`) |
+| `POST` | `/auth/refresh` | Rotate the refresh token and issue a new access cookie |
+| `POST` | `/auth/logout` | Revoke the current session |
+| `GET` | `/auth/me` | Read the authenticated user's profile and role |
+| `POST` | `/auth/change-password` | Change the current user's password and revoke sessions |
+| `GET` / `POST` | `/auth/users` | ADMIN: list or add users within the tenant |
+| `PATCH` | `/auth/users/{user_id}/role` | ADMIN: change a tenant user's role |
+| `DELETE` | `/auth/users/{user_id}` | ADMIN: deactivate a tenant user |
+| `GET` | `/api/v1/documents` | List documents the user is allowed to read |
+| `POST` | `/api/v1/documents/upload` | ADMIN/EDITOR: upload a document as multipart field `file` |
+| `DELETE` | `/api/v1/documents/{filename}` | ADMIN or an authorized EDITOR: delete a document |
+| `GET` / `PUT` | `/api/v1/documents/{filename}/permissions` | ADMIN: read or replace document grants |
+| `POST` | `/api/v1/ingest` | ADMIN/EDITOR: parse, chunk, embed, and index the tenant corpus |
+| `POST` | `/api/v1/ask` | Query only permitted documents; e.g. `{"query":"What does it explain?","top_k":5}` |
 | `GET` | `/api/v1/metrics` | Read tenant-scoped bounded metrics |
-| `GET` | `/api/v1/settings` | Read non-secret application settings |
+| `GET` | `/api/v1/settings` | ADMIN: read non-secret application settings |
 | `GET` | `/api/v1/cache/stats` | Read tenant-scoped cache statistics |
 | `POST` | `/api/v1/cache/invalidate` | Invalidate the current tenant's answer cache |
 
-All `/api/v1/*` routes use the development tenant when auth is disabled, or the validated tenant identity when auth is enabled.
+Unsafe browser requests require the CSRF cookie value in the `X-CSRF-Token` header. The frontend client handles this and refreshes the session when the access cookie expires. Tokens are never returned in API response bodies.
+
+## Authentication and authorization
+
+Every public signup creates a separate tenant; its first account is ADMIN. ADMINs invite additional users into their tenant. Email addresses are globally unique. Passwords are Argon2-hashed. JWT access cookies are short lived and validated against active server-side sessions; opaque refresh tokens are stored only as hashes, rotated on refresh, and revoked on logout, password changes, role changes, and account deactivation.
+
+Authentication uses HttpOnly, SameSite=Strict cookies. The CSRF cookie is intentionally readable by the browser and must be echoed in `X-CSRF-Token` on unsafe requests. Cookies are Secure and use `__Host-` names in production; production must use HTTPS. The browser does not receive bearer tokens in JSON or store them in `localStorage`.
+
+| Capability | ADMIN | EDITOR | VIEWER |
+|---|---:|---:|---:|
+| Manage tenant users and roles | Yes | No | No |
+| Manage document permissions | Yes | No | No |
+| Read all tenant documents | Yes | No | No |
+| Read owned or explicitly granted documents | Yes | Yes | Yes |
+| Upload new documents | Yes | Yes | No |
+| Update/delete owned or edit-granted documents | Yes | Yes | No |
+| Query RAG over permitted documents | Yes | Yes | Yes |
+| Read tenant settings | Yes | No | No |
+
+Document-level grants are managed using `PUT /api/v1/documents/{filename}/permissions`, with a `permissions` array of `{user_id, can_read, can_edit}` objects. Only active users in the same tenant can receive grants. Retrieval applies the permitted document IDs inside the vector-store query, and semantic-cache scope includes tenant, user, role, and the current allowed-document set.
+
+The backend records security audit events for registration, successful and failed logins, logout, password changes, user administration, document upload/deletion, and permission changes. Audit records include actor/tenant/resource identifiers and timestamps, never passwords or token contents.
 
 ## Configuration
 
@@ -119,22 +162,26 @@ Copy `.env.example` for local use and inspect its comments for the available set
 | `OPENAI_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY` | Optional provider credentials; supply outside source control |
 | `OLLAMA_BASE_URL` | Ollama service URL |
 | `PROVIDER_TIMEOUT_SECONDS`, `PROVIDER_RETRY_COUNT` | Provider request timeout and retry limit |
-| `REQUIRE_TENANT_AUTH`, `AUTH_SECRET_KEY` | Enable and configure signed tenant tokens |
+| `REQUIRE_TENANT_AUTH` | Legacy external signed-tenant-token mode |
+| `AUTHENTICATION_REQUIRED` | Require built-in user authentication on protected API routes |
+| `AUTH_SECRET_KEY`, `AUTH_ISSUER`, `AUTH_AUDIENCE` | JWT signing secret and token validation context |
+| `AUTH_ACCESS_TOKEN_TTL_MINUTES`, `AUTH_REFRESH_TOKEN_TTL_DAYS` | Access lifetime and refresh-session lifetime |
+| `AUTH_PASSWORD_MIN_LENGTH` | Minimum password length (12–128 characters) |
 | `CORS_ALLOWED_ORIGINS` | Explicit browser origins allowed by CORS |
 | `MAX_DOCUMENT_BYTES` | Maximum accepted document size |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | Per-process request limit per tenant |
 | `DATABASE_URL`, `MAX_METRIC_RECORDS` | File-backed SQLite metrics database and record cap |
 
-Settings are validated at application startup. Production mode rejects unsafe combinations including disabled tenant auth, a weak/development signing key, debug mode, wildcard/localhost browser origins, and local or non-HTTPS remote Qdrant configuration.
+Settings are validated at application startup. Production mode rejects unsafe combinations including disabled built-in authentication, a weak/development signing key, debug mode, wildcard/localhost browser origins, and local or non-HTTPS remote Qdrant configuration. `REQUIRE_TENANT_AUTH` is the legacy tenant-token setting; built-in user auth is controlled by `AUTHENTICATION_REQUIRED`.
 
 ## Security and authentication
 
-- In development, API authentication is disabled by default and requests share the configured `DEFAULT_TENANT_ID`. The development server should remain bound to loopback and must not be treated as a multi-user deployment.
+Built-in authentication is disabled by default in general development settings, but enabled in `.env.example`. Set `AUTHENTICATION_REQUIRED=true` and a strong `AUTH_SECRET_KEY` to require user authentication. When disabled, the legacy local-development tenant behavior remains; bind the server to loopback and do not treat it as a multi-user deployment. Legacy signed tenant tokens are accepted only while built-in authentication is disabled and do not provide user-level roles or permissions.
+
 - When tenant auth is enabled, API clients send `Authorization: Bearer <signed-token>`. Tokens use HS256 and must contain a safe `tenant_id`, non-empty `sub`, matching `iss` and `aud`, numeric `iat` and `exp`, and a lifetime within `AUTH_MAX_TOKEN_TTL_SECONDS`.
-- The backend validates tokens but does **not** provide a user database, login endpoint, token issuance, refresh flow, account management, or role/permission system. A trusted identity provider must issue tokens that follow the configured contract. Never put the signing key in the frontend.
 - Tenant identity scopes document paths, vector retrieval, citations, cache entries/invalidation, and metrics. Tenant directory names are derived from tenant identifiers rather than using the raw identifier as a path.
 - Uploads are restricted to `.txt` and `.pdf`, validated and size-limited, and stored under the tenant corpus directory. Upload and deletion invalidate that tenant's indexed corpus/cache.
-- CORS must use explicit origins; wildcard origins are rejected. Authentication uses bearer headers, not cookies.
+- CORS must use explicit origins; wildcard origins are rejected. Cookie authentication uses SameSite restrictions, origin checks, and CSRF tokens on unsafe requests.
 - `/health` and `/ready` are unauthenticated and do not return tenant content. Avoid exposing operational endpoints beyond what your deployment requires.
 - External answer providers receive the user's question and retrieved document excerpts. Assess provider data handling, retention, and regional requirements before enabling them.
 
@@ -162,7 +209,7 @@ The cache is an optimization, not a correctness guarantee. Similarity matches ca
 - Uploaded documents are stored as files under `CORPUS_DIR`; local Qdrant stores vectors/cache data under `QDRANT_LOCAL_PATH`; SQLite stores bounded request summaries under `DATABASE_URL`.
 - Tenant-isolated corpus folders are used when tenant isolation is enabled. Do not place private or production documents in the repository's sample/local data directories.
 - Metrics retain request summaries and aggregate usage, not full user queries or document contents. They are bounded by `MAX_METRIC_RECORDS`.
-- The metrics implementation supports file-backed SQLite only. It does not provide PostgreSQL support, distributed analytics, or a migration framework.
+- Auth persistence and bounded request metrics use the configured file-backed SQLite `DATABASE_URL`; authentication schema changes are managed with Alembic. The current implementation does not provide PostgreSQL support or distributed analytics.
 - The rate limiter is process-local and its state is not shared among workers or instances.
 - Embedded/local Qdrant is for single-process development. Do not share its storage directory among multiple server processes. Production configuration expects HTTPS remote Qdrant with an API key.
 - Back up and protect document files, vector-store data, metrics databases, and signing keys according to your own retention and recovery requirements.
@@ -170,12 +217,12 @@ The cache is an optimization, not a correctness guarantee. Similarity matches ca
 
 ## Tests and quality checks
 
-Install the development dependencies with `python -m pip install -e ".[dev]"`, then run from the repository root:
+Install the development dependencies with `python -m pip install -e ".[dev]"`, run `alembic upgrade head` after setting `DATABASE_URL`, then run from the repository root:
 
 ```powershell
 python -m pytest
-ruff check .
-ruff format --check backend tests scripts
+ruff check backend tests
+ruff format --check backend/app/api backend/app/core/config.py backend/app/core/database.py backend/app/main.py backend/app/models/auth.py backend/app/repositories/qdrant_vector_store.py backend/app/schemas/api.py backend/app/schemas/auth.py backend/app/services/auth_service.py backend/app/services/document_permissions.py backend/app/services/rag_service.py backend/migrations tests/integration/test_auth_rbac.py tests/unit/test_environment.py
 python -m compileall -q backend tests
 ```
 
@@ -183,6 +230,7 @@ Run frontend checks from `frontend`:
 
 ```powershell
 npm ci
+npm test
 npm run lint
 npm run build
 ```
@@ -198,12 +246,14 @@ python scripts/verify_env.py
 ## Known limitations
 
 - **Not production-ready or security-certified.** The project has not undergone an independent security audit or deployment-specific load, resilience, or penetration testing.
-- **No built-in identity lifecycle:** no login, users/passwords, token issuance/refresh, JWKS, key rotation, revocation, or fine-grained roles. External identity-provider integration is required.
+- **Built-in identity scope:** local password authentication and tenant RBAC are implemented, but there is no SSO/OIDC/JWKS integration, MFA, email verification, password reset, signing-key rotation, or organization identity lifecycle.
+- **Signup behavior:** public signup creates a new tenant and an ADMIN account. A tenant admin must provision additional users; signup does not join an existing tenant.
+- **Existing content migration:** the authentication migration adds tables but does not assign existing corpus files or vector records to a tenant/user. Back up and deliberately migrate or re-upload existing content before enabling authenticated access to it.
+- **Audit operations:** audit events are stored in the application database but are not exported to a centralized append-only security information and event management (SIEM) system.
 - **Single-process operational features:** rate limiting is process-local; local embedded Qdrant is single-process only.
-- **Storage constraints:** metrics support SQLite only; there is no PostgreSQL backend or database migration system.
+- **Storage constraints:** auth and metrics storage currently support SQLite only; there is no PostgreSQL backend.
 - **Provider verification:** automated tests mock provider responses; live OpenAI, Groq, Gemini, and Ollama calls are not part of the test suite. Reported cost may differ from actual billed cost.
 - **Model quality:** local extractive answers and provider confidence are not guarantees of factual correctness; retrieval can miss relevant passages or return weak matches.
 - **Document safety:** no antivirus scanning, malware detection, PDF sandbox, OCR for scanned PDFs, or formal document-retention workflow is included.
-- **Deployment tooling:** no Docker/Compose files, production frontend auth flow, shared rate limiter, centralized logging/monitoring, automated backups, or disaster-recovery setup is provided.
+- **Deployment tooling:** no Docker/Compose files, shared rate limiter, centralized logging/monitoring, automated backups, or disaster-recovery setup is provided.
 - **Legacy vector data:** vectors created before tenant/corpus scoping may not be recognized by the current scoped retrieval flow. Back up existing data and re-index through the current application as appropriate; no automatic legacy migration is provided.
-

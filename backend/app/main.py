@@ -5,11 +5,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from backend.app.api.auth_routes import router as auth_router
 from backend.app.api.routes import router
 from backend.app.core.config import Settings
+from backend.app.core.database import Base, create_database_engine, create_session_factory
 from backend.app.core.security import TenantRateLimiter
+from backend.app.models import auth as auth_models  # noqa: F401
 from backend.app.repositories.qdrant_vector_store import QdrantVectorStore
 from backend.app.services.answer_provider import ExtractiveAnswerProvider, RoutedAnswerProvider
 from backend.app.services.chunking import TextChunker
@@ -154,12 +158,33 @@ def create_app(
             app_settings.MAX_METRIC_RECORDS,
         )
         app.state.metrics_store = metrics_store
+        engine = create_database_engine(app_settings.DATABASE_URL)
+        app.state.db_engine = engine
+        app.state.db_session_factory = create_session_factory(engine)
+        if app_settings.APP_ENV == "testing":
+            Base.metadata.create_all(engine)
+        else:
+            required_auth_tables = {
+                "auth_tenants",
+                "auth_users",
+                "auth_sessions",
+                "auth_documents",
+                "auth_document_permissions",
+                "auth_audit_events",
+            }
+            missing_tables = required_auth_tables - set(inspect(engine).get_table_names())
+            if missing_tables:
+                raise RuntimeError(
+                    "Authentication database tables are missing; run `alembic upgrade head`."
+                )
         app.state.rate_limiter = TenantRateLimiter(app_settings.RATE_LIMIT_REQUESTS_PER_MINUTE)
+        app.state.auth_rate_limiter = TenantRateLimiter(10)
         try:
             app.state.rag_service = service or build_rag_service(app_settings)
             yield
         finally:
             metrics_store.close()
+            engine.dispose()
             rag_service = getattr(app.state, "rag_service", None)
             vector_store = getattr(rag_service, "vector_store", None)
             client = getattr(vector_store, "client", None)
@@ -183,10 +208,11 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.CORS_ALLOWED_ORIGINS,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
+    app.include_router(auth_router)
     app.include_router(router)
     return app
 

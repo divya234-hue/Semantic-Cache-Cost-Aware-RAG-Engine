@@ -12,6 +12,7 @@ import type { DocumentInfo } from '../api'
 
 interface DocumentListProps {
   documents: DocumentInfo[]
+  canManageDocuments: boolean
   loading: boolean
   error: string | null
   refreshing: boolean
@@ -37,6 +38,7 @@ function formatFileSize(size: number): string {
 
 export function DocumentList({
   documents,
+  canManageDocuments,
   loading,
   error,
   refreshing,
@@ -90,15 +92,17 @@ export function DocumentList({
           </p>
         </div>
         <div className="panel-heading__actions">
-          <button
-            className="button button--secondary"
-            type="button"
-            onClick={onReindex}
-            disabled={reindexing || uploading || documents.length === 0}
-          >
-            <RefreshCw size={15} className={reindexing ? 'spin' : ''} />
-            {reindexing ? 'Indexing…' : 'Re-index corpus'}
-          </button>
+          {canManageDocuments && (
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={onReindex}
+              disabled={reindexing || uploading || documents.length === 0}
+            >
+              <RefreshCw size={15} className={reindexing ? 'spin' : ''} />
+              {reindexing ? 'Indexing…' : 'Re-index corpus'}
+            </button>
+          )}
           <button
             className="icon-button"
             type="button"
@@ -112,57 +116,59 @@ export function DocumentList({
         </div>
       </div>
 
-      <div
-        className={`upload-box ${dragging ? 'is-dragging' : ''}`}
-        onDragEnter={(event) => {
-          event.preventDefault()
-          setDragging(true)
-        }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setDragging(false)
-          }
-        }}
-        onDrop={handleDrop}
-      >
-        <span className="upload-box__icon" aria-hidden="true">
-          <UploadCloud size={22} />
-        </span>
-        <div className="upload-box__copy">
-          <strong>{uploading ? 'Uploading document…' : 'Drop a file to add it to your corpus'}</strong>
-          <span>
-            {uploading && uploadProgress !== null
-              ? `Upload progress · ${uploadProgress}%`
-              : 'PDF or TXT · stored locally and indexed after upload'}
-          </span>
-          {uploading && (
-            <progress
-              className="upload-progress"
-              max="100"
-              value={uploadProgress ?? undefined}
-              aria-label="Document upload progress"
-            />
-          )}
-        </div>
-        <button
-          className="button button--primary"
-          type="button"
-          onClick={() => fileInput.current?.click()}
-          disabled={uploading || reindexing}
+      {canManageDocuments && (
+        <div
+          className={`upload-box ${dragging ? 'is-dragging' : ''}`}
+          onDragEnter={(event) => {
+            event.preventDefault()
+            setDragging(true)
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setDragging(false)
+            }
+          }}
+          onDrop={handleDrop}
         >
-          <UploadCloud size={16} />
-          {uploading ? 'Working…' : 'Choose file'}
-        </button>
-        <input
-          ref={fileInput}
-          className="visually-hidden"
-          type="file"
-          accept=".txt,.pdf,text/plain,application/pdf"
-          onChange={handleFileChange}
-          aria-label="Choose a TXT or PDF file"
-        />
-      </div>
+          <span className="upload-box__icon" aria-hidden="true">
+            <UploadCloud size={22} />
+          </span>
+          <div className="upload-box__copy">
+            <strong>{uploading ? 'Uploading document…' : 'Drop a file to add it to your corpus'}</strong>
+            <span>
+              {uploading && uploadProgress !== null
+                ? `Upload progress · ${uploadProgress}%`
+                : 'PDF or TXT · stored locally and indexed after upload'}
+            </span>
+            {uploading && (
+              <progress
+                className="upload-progress"
+                max="100"
+                value={uploadProgress ?? undefined}
+                aria-label="Document upload progress"
+              />
+            )}
+          </div>
+          <button
+            className="button button--primary"
+            type="button"
+            onClick={() => fileInput.current?.click()}
+            disabled={uploading || reindexing}
+          >
+            <UploadCloud size={16} />
+            {uploading ? 'Working…' : 'Choose file'}
+          </button>
+          <input
+            ref={fileInput}
+            className="visually-hidden"
+            type="file"
+            accept=".txt,.pdf,text/plain,application/pdf"
+            onChange={handleFileChange}
+            aria-label="Choose a TXT or PDF file"
+          />
+        </div>
+      )}
 
       {uploadMessage && <div className="notice notice--success" role="status">{uploadMessage}</div>}
       {uploadError && <div className="notice notice--error" role="alert">{uploadError}</div>}
@@ -231,18 +237,21 @@ export function DocumentList({
               </span>
               <span className="document-row__meta">{formatFileSize(document.size_bytes)}</span>
               <span className="document-row__meta">{document.modified_at}</span>
-              <button
-                className="icon-button icon-button--danger"
-                type="button"
-                onClick={() => onDelete(document)}
-                disabled={deletingFilename !== null || uploading || reindexing}
-                aria-label={`Delete ${document.name}`}
-                title="Delete document"
-              >
-                {deletingFilename === document.name
-                  ? <span className="loader loader--tiny" />
-                  : <Trash2 size={16} />}
-              </button>
+              {canManageDocuments && document.can_edit && (
+                <button
+                  className="icon-button icon-button--danger"
+                  type="button"
+                  onClick={() => onDelete(document)}
+                  disabled={deletingFilename !== null || uploading || reindexing}
+                  aria-label={`Delete ${document.name}`}
+                  title="Delete document"
+                >
+                  {deletingFilename === document.name
+                    ? <span className="loader loader--tiny" />
+                    : <Trash2 size={16} />}
+                </button>
+              )}
+              {(!canManageDocuments || !document.can_edit) && <span aria-hidden="true" />}
             </li>
           ))}
         </ul>

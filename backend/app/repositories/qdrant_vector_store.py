@@ -100,25 +100,36 @@ class QdrantVectorStore:
         limit: int,
         tenant_id: str = "tenant-default",
         corpus_version: str | None = None,
+        allowed_document_ids: Sequence[str] | None = None,
     ) -> list[RetrievedChunk]:
         version = corpus_version or self.current_corpus_version(tenant_id)
-        if not version or not self.client.collection_exists(self.collection_name):
+        if (
+            not version
+            or not self.client.collection_exists(self.collection_name)
+            or allowed_document_ids == []
+        ):
             return []
+        conditions = [
+            models.FieldCondition(
+                key="corpus_version",
+                match=models.MatchValue(value=version),
+            ),
+            models.FieldCondition(
+                key="tenant_id",
+                match=models.MatchValue(value=tenant_id),
+            ),
+        ]
+        if allowed_document_ids is not None:
+            conditions.append(
+                models.FieldCondition(
+                    key="document_id",
+                    match=models.MatchAny(any=list(allowed_document_ids)),
+                )
+            )
         result = self.client.query_points(
             collection_name=self.collection_name,
             query=list(vector),
-            query_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="corpus_version",
-                        match=models.MatchValue(value=version),
-                    ),
-                    models.FieldCondition(
-                        key="tenant_id",
-                        match=models.MatchValue(value=tenant_id),
-                    ),
-                ]
-            ),
+            query_filter=models.Filter(must=conditions),
             limit=limit,
             with_payload=True,
         )
@@ -170,6 +181,8 @@ class QdrantVectorStore:
         tenant_id: str,
         corpus_version: str,
         threshold: float,
+        *,
+        permission_scope: str = "tenant-default",
     ) -> tuple[dict[str, Any], float] | None:
         if not self.client.collection_exists(self.cache_collection_name):
             return None
@@ -188,6 +201,10 @@ class QdrantVectorStore:
                     models.FieldCondition(
                         key="expires_at",
                         range=models.Range(gt=time.time()),
+                    ),
+                    models.FieldCondition(
+                        key="permission_scope",
+                        match=models.MatchValue(value=permission_scope),
                     ),
                 ]
             ),
@@ -212,6 +229,8 @@ class QdrantVectorStore:
         tenant_id: str,
         corpus_version: str,
         ttl_seconds: int,
+        *,
+        permission_scope: str = "tenant-default",
     ) -> None:
         current_time = time.time()
         if not self.client.collection_exists(self.cache_collection_name):
@@ -249,13 +268,14 @@ class QdrantVectorStore:
                     id=str(
                         uuid.uuid5(
                             uuid.NAMESPACE_URL,
-                            f"{tenant_id}:{corpus_version}:{vector_fingerprint}",
+                            f"{tenant_id}:{corpus_version}:{permission_scope}:{vector_fingerprint}",
                         )
                     ),
                     vector=list(vector),
                     payload={
                         "tenant_id": tenant_id,
                         "corpus_version": corpus_version,
+                        "permission_scope": permission_scope,
                         "created_at": current_time,
                         "expires_at": current_time + ttl_seconds,
                         "response": response,
@@ -301,7 +321,12 @@ class QdrantVectorStore:
         self.invalidate_cache(tenant_id)
         self._current_corpus_versions.pop(tenant_id, None)
 
-    def cache_entry_count(self, tenant_id: str, corpus_version: str) -> int:
+    def cache_entry_count(
+        self,
+        tenant_id: str,
+        corpus_version: str,
+        permission_scope: str = "tenant-default",
+    ) -> int:
         if not self.client.collection_exists(self.cache_collection_name):
             return 0
         return self.client.count(
@@ -318,6 +343,10 @@ class QdrantVectorStore:
                     models.FieldCondition(
                         key="expires_at",
                         range=models.Range(gt=time.time()),
+                    ),
+                    models.FieldCondition(
+                        key="permission_scope",
+                        match=models.MatchValue(value=permission_scope),
                     ),
                 ]
             ),

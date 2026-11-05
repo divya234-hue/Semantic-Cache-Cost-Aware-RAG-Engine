@@ -15,10 +15,13 @@ from qdrant_client.http.exceptions import (
     ResponseHandlingException,
     UnexpectedResponse,
 )
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
+from backend.app.api.dependencies import AuthContext, CurrentUser, DatabaseSession
 from backend.app.core.config import Settings
-from backend.app.core.security import TenantContext, require_tenant
+from backend.app.models.auth import DocumentPermission, DocumentRecord, UserRole
 from backend.app.schemas.api import (
     AskRequest,
     AskResponse,
@@ -32,8 +35,23 @@ from backend.app.schemas.api import (
     MetricsSummaryResponse,
     SystemSettingsResponse,
 )
+from backend.app.schemas.auth import (
+    DocumentPermissionInput,
+    DocumentPermissionsRequest,
+    DocumentPermissionsResponse,
+)
 from backend.app.services.answer_provider import ProviderError
+from backend.app.services.auth_service import record_audit
 from backend.app.services.document_loader import DocumentLoadError, NoDocumentsFoundError
+from backend.app.services.document_permissions import (
+    can_edit_document,
+    get_document_record,
+    permission_scope,
+    permitted_document_ids,
+    permitted_document_paths,
+    record_document_owner,
+    replace_document_permissions,
+)
 from backend.app.services.metrics_store import MetricsStore
 from backend.app.services.rag_service import RagService
 
@@ -82,10 +100,17 @@ def get_metrics_store(request: Request) -> MetricsStore:
     return store
 
 
-def get_tenant(request: Request) -> TenantContext:
-    tenant = require_tenant(request)
-    request.app.state.rate_limiter.check(tenant.tenant_id)
-    return tenant
+def get_tenant(
+    request: Request,
+    context: CurrentUser,
+) -> AuthContext:
+    request.app.state.rate_limiter.check(context.tenant_id)
+    return context
+
+
+def _require_role(context: AuthContext, *roles: UserRole) -> None:
+    if context.role not in roles:
+        raise HTTPException(status_code=403, detail="This account does not have permission.")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -128,8 +153,9 @@ def readiness(
 @router.post("/api/v1/ingest", response_model=IngestResponse)
 def ingest_documents(
     service: Annotated[RagService, Depends(get_rag_service)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
 ) -> IngestResponse:
+    _require_role(tenant, UserRole.ADMIN, UserRole.EDITOR)
     try:
         document_count, chunk_count, corpus_version = service.ingest(tenant.tenant_id)
     except NoDocumentsFoundError as exc:
@@ -153,12 +179,20 @@ def ask(
     payload: AskRequest,
     service: Annotated[RagService, Depends(get_rag_service)],
     settings: Annotated[Settings, Depends(get_settings)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
     metrics: Annotated[MetricsStore, Depends(get_metrics_store)],
+    db: DatabaseSession,
 ) -> AskResponse:
     started = perf_counter()
     try:
-        result = service.ask(payload.query, payload.top_k or settings.top_k, tenant.tenant_id)
+        document_ids = permitted_document_ids(db, tenant)
+        result = service.ask(
+            payload.query,
+            payload.top_k or settings.top_k,
+            tenant.tenant_id,
+            allowed_document_ids=document_ids,
+            permission_scope=permission_scope(db, tenant),
+        )
     except ProviderError as exc:
         logger.warning("Configured answer provider failed (%s).", type(exc).__name__)
         raise HTTPException(
@@ -183,8 +217,9 @@ def ask(
 def get_system_settings(
     settings: Annotated[Settings, Depends(get_settings)],
     service: Annotated[RagService, Depends(get_rag_service)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
 ) -> SystemSettingsResponse:
+    _require_role(tenant, UserRole.ADMIN)
     return SystemSettingsResponse(
         app_name=settings.APP_NAME,
         app_env=settings.APP_ENV,
@@ -208,20 +243,27 @@ def get_system_settings(
         cheap_output_price=settings.CHEAP_MODEL_OUTPUT_PRICE_PER_1M,
         strong_input_price=settings.STRONG_MODEL_INPUT_PRICE_PER_1M,
         strong_output_price=settings.STRONG_MODEL_OUTPUT_PRICE_PER_1M,
-        tenant_auth_enabled=settings.REQUIRE_TENANT_AUTH,
+        tenant_auth_enabled=settings.AUTHENTICATION_REQUIRED,
     )
 
 
 @router.get("/api/v1/documents", response_model=DocumentListResponse)
 def list_documents(
     settings: Annotated[Settings, Depends(get_settings)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
 ) -> DocumentListResponse:
     doc_dir = settings.tenant_documents_dir(tenant.tenant_id)
     docs: list[DocumentInfo] = []
+    allowed_paths = permitted_document_paths(db, tenant)
     if doc_dir.exists() and doc_dir.is_dir():
         for file_path in sorted(doc_dir.iterdir()):
-            if file_path.is_file() and file_path.suffix.lower() in {".txt", ".pdf"}:
+            relative_path = file_path.relative_to(doc_dir).as_posix()
+            if (
+                file_path.is_file()
+                and file_path.suffix.lower() in {".txt", ".pdf"}
+                and (allowed_paths is None or relative_path in allowed_paths)
+            ):
                 stat = file_path.stat()
                 modified = datetime.datetime.fromtimestamp(stat.st_mtime, tz=datetime.UTC)
                 docs.append(
@@ -231,6 +273,7 @@ def list_documents(
                         size_bytes=stat.st_size,
                         extension=file_path.suffix.lower(),
                         modified_at=modified.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        can_edit=can_edit_document(db, tenant, relative_path),
                     )
                 )
     return DocumentListResponse(documents=docs, total_count=len(docs), corpus_dir=str(doc_dir))
@@ -241,8 +284,10 @@ async def upload_document(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     service: Annotated[RagService, Depends(get_rag_service)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
 ) -> DocumentUploadResponse:
+    _require_role(tenant, UserRole.ADMIN, UserRole.EDITOR)
     form = await request.form(max_files=1, max_fields=0)
     try:
         file = form.get("file")
@@ -251,7 +296,7 @@ async def upload_document(
                 status_code=400,
                 detail="Upload exactly one document using the multipart field 'file'.",
             )
-        return await _persist_document(file, settings, service, tenant)
+        return await _persist_document(file, settings, service, tenant, db)
     finally:
         await form.close()
 
@@ -260,7 +305,8 @@ async def _persist_document(
     file: UploadFile,
     settings: Settings,
     service: RagService,
-    tenant: TenantContext,
+    tenant: AuthContext,
+    db: Session,
 ) -> DocumentUploadResponse:
     filename = file.filename or ""
     if not _is_safe_filename(filename):
@@ -306,10 +352,21 @@ async def _persist_document(
         doc_dir = settings.tenant_documents_dir(tenant.tenant_id)
         doc_dir.mkdir(parents=True, exist_ok=True)
         target_path = doc_dir / filename
+        if target_path.is_symlink():
+            raise HTTPException(
+                status_code=403,
+                detail="Symbolic-link documents cannot be replaced.",
+            )
+        if target_path.exists() and not can_edit_document(db, tenant, filename):
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have edit access to this document.",
+            )
         temporary_path = doc_dir / f".upload-{uuid.uuid4().hex}.tmp"
         try:
             temporary_path.write_bytes(content)
             os.replace(temporary_path, target_path)
+            service.invalidate_tenant(tenant.tenant_id)
         except OSError as exc:
             logger.error("Document upload failed (%s).", type(exc).__name__)
             raise HTTPException(status_code=500, detail="The document could not be saved.") from exc
@@ -317,7 +374,16 @@ async def _persist_document(
             if temporary_path.exists():
                 temporary_path.unlink()
 
-        service.invalidate_tenant(tenant.tenant_id)
+        record_document_owner(db, tenant.tenant_id, filename, tenant.user_id)
+        record_audit(
+            db,
+            "document.uploaded",
+            actor_user_id=tenant.user_id,
+            tenant_id=tenant.tenant_id,
+            resource_type="document",
+            resource_id=filename,
+        )
+        db.commit()
     return DocumentUploadResponse(
         filename=filename,
         size_bytes=len(content),
@@ -330,7 +396,8 @@ def delete_document(
     filename: str,
     settings: Annotated[Settings, Depends(get_settings)],
     service: Annotated[RagService, Depends(get_rag_service)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
 ) -> DocumentDeleteResponse:
     if not _is_safe_filename(filename) or Path(filename).suffix.lower() not in {".txt", ".pdf"}:
         raise HTTPException(status_code=400, detail="A safe document filename is required.")
@@ -346,8 +413,24 @@ def delete_document(
             raise HTTPException(status_code=403, detail="Access denied.")
         if not target_path.is_file():
             raise HTTPException(status_code=404, detail="Document not found.")
+        if not can_edit_document(db, tenant, filename):
+            raise HTTPException(
+                status_code=403, detail="You do not have edit access to this document."
+            )
         target_path.unlink()
         service.invalidate_tenant(tenant.tenant_id)
+        record = get_document_record(db, tenant.tenant_id, filename)
+        if record is not None:
+            db.delete(record)
+        record_audit(
+            db,
+            "document.deleted",
+            actor_user_id=tenant.user_id,
+            tenant_id=tenant.tenant_id,
+            resource_type="document",
+            resource_id=filename,
+        )
+        db.commit()
     return DocumentDeleteResponse(
         filename=filename,
         message=f"Document '{filename}' was deleted from the corpus.",
@@ -358,7 +441,7 @@ def delete_document(
 def get_metrics_summary(
     service: Annotated[RagService, Depends(get_rag_service)],
     metrics: Annotated[MetricsStore, Depends(get_metrics_store)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
 ) -> MetricsSummaryResponse:
     snapshot = metrics.snapshot(tenant.tenant_id)
     return MetricsSummaryResponse(
@@ -387,14 +470,19 @@ def get_cache_stats(
     settings: Annotated[Settings, Depends(get_settings)],
     service: Annotated[RagService, Depends(get_rag_service)],
     metrics: Annotated[MetricsStore, Depends(get_metrics_store)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
 ) -> CacheStatsResponse:
     version = getattr(service.vector_store, "current_corpus_version", lambda _tenant: None)(
         tenant.tenant_id
     )
     snapshot = metrics.snapshot(tenant.tenant_id)
     count_entries = getattr(service.vector_store, "cache_entry_count", None)
-    total_entries = count_entries(tenant.tenant_id, version) if version and count_entries else 0
+    total_entries = (
+        count_entries(tenant.tenant_id, version, permission_scope(db, tenant))
+        if version and count_entries
+        else 0
+    )
     return CacheStatsResponse(
         enabled=settings.SEMANTIC_CACHE_ENABLED,
         threshold=settings.SEMANTIC_CACHE_THRESHOLD,
@@ -409,7 +497,83 @@ def get_cache_stats(
 @router.post("/api/v1/cache/invalidate")
 def invalidate_cache(
     service: Annotated[RagService, Depends(get_rag_service)],
-    tenant: Annotated[TenantContext, Depends(get_tenant)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
 ) -> dict[str, str]:
+    _require_role(tenant, UserRole.ADMIN, UserRole.EDITOR)
     service.invalidate_cache(tenant.tenant_id)
     return {"status": "success", "message": "Tenant semantic cache invalidated."}
+
+
+@router.get(
+    "/api/v1/documents/{filename}/permissions",
+    response_model=DocumentPermissionsResponse,
+)
+def get_document_permissions(
+    filename: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
+) -> DocumentPermissionsResponse:
+    _require_role(tenant, UserRole.ADMIN)
+    if not _is_safe_filename(filename):
+        raise HTTPException(status_code=400, detail="A safe document filename is required.")
+    document_path = settings.tenant_documents_dir(tenant.tenant_id) / filename
+    if not document_path.is_file() or document_path.is_symlink():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    record = get_document_record(db, tenant.tenant_id, filename)
+    if record is None:
+        return DocumentPermissionsResponse(permissions=[])
+    permissions = db.scalars(
+        select(DocumentPermission).where(DocumentPermission.document_id == record.id)
+    ).all()
+    return DocumentPermissionsResponse(
+        permissions=[
+            DocumentPermissionInput(
+                user_id=permission.user_id,
+                can_read=permission.can_read,
+                can_edit=permission.can_edit,
+            )
+            for permission in permissions
+        ]
+    )
+
+
+@router.put(
+    "/api/v1/documents/{filename}/permissions",
+    response_model=DocumentPermissionsResponse,
+)
+def set_document_permissions(
+    filename: str,
+    payload: DocumentPermissionsRequest,
+    settings: Annotated[Settings, Depends(get_settings)],
+    tenant: Annotated[AuthContext, Depends(get_tenant)],
+    db: DatabaseSession,
+) -> DocumentPermissionsResponse:
+    _require_role(tenant, UserRole.ADMIN)
+    if not _is_safe_filename(filename):
+        raise HTTPException(status_code=400, detail="A safe document filename is required.")
+    document_path = settings.tenant_documents_dir(tenant.tenant_id) / filename
+    if not document_path.is_file() or document_path.is_symlink():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    record = get_document_record(db, tenant.tenant_id, filename)
+    if record is None:
+        record = DocumentRecord(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant.tenant_id,
+            source_path=filename,
+            owner_user_id=None,
+            created_at=datetime.datetime.now(datetime.UTC),
+            updated_at=datetime.datetime.now(datetime.UTC),
+        )
+        db.add(record)
+        db.flush()
+    replace_document_permissions(
+        db,
+        tenant,
+        record,
+        [
+            (permission.user_id, permission.can_read, permission.can_edit)
+            for permission in payload.permissions
+        ],
+    )
+    return DocumentPermissionsResponse(permissions=payload.permissions)

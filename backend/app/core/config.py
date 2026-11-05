@@ -160,12 +160,20 @@ class Settings(BaseSettings):
         default="tenant-default", description="Development tenant identifier"
     )
     REQUIRE_TENANT_AUTH: bool = Field(
-        default=False, description="Require signed tenant bearer tokens"
+        default=False, description="Deprecated compatibility setting for legacy tenant tokens"
     )
     AUTH_SECRET_KEY: str | None = Field(default=None, description="HS256 JWT signing secret")
     AUTH_ISSUER: str = Field(default="semantic-cache-rag")
     AUTH_AUDIENCE: str = Field(default="semantic-cache-rag-api")
-    AUTH_MAX_TOKEN_TTL_SECONDS: int = Field(default=86400, ge=60, le=604800)
+    AUTH_MAX_TOKEN_TTL_SECONDS: int = Field(
+        default=86400, ge=60, le=604800, description="Legacy tenant-token lifetime limit"
+    )
+    AUTHENTICATION_REQUIRED: bool = Field(
+        default=False, description="Require a registered user for protected API routes"
+    )
+    AUTH_ACCESS_TOKEN_TTL_MINUTES: int = Field(default=15, ge=1, le=60)
+    AUTH_REFRESH_TOKEN_TTL_DAYS: int = Field(default=30, ge=1, le=90)
+    AUTH_PASSWORD_MIN_LENGTH: int = Field(default=12, ge=12, le=128)
     CORS_ALLOWED_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
@@ -339,8 +347,8 @@ class Settings(BaseSettings):
         if self.APP_ENV == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must be disabled in production.")
-            if not self.REQUIRE_TENANT_AUTH:
-                raise ValueError("REQUIRE_TENANT_AUTH must be enabled in production.")
+            if not self.AUTHENTICATION_REQUIRED:
+                raise ValueError("AUTHENTICATION_REQUIRED must be enabled in production.")
             if not self.AUTH_SECRET_KEY or len(self.AUTH_SECRET_KEY) < 32:
                 raise ValueError(
                     "AUTH_SECRET_KEY must contain at least 32 characters in production."
@@ -368,11 +376,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production Ollama endpoints must use HTTPS unless loopback-local."
                 )
-        if self.REQUIRE_TENANT_AUTH and (
+        if self.AUTHENTICATION_REQUIRED and (
             not self.AUTH_SECRET_KEY or len(self.AUTH_SECRET_KEY) < 32
         ):
             raise ValueError(
-                "AUTH_SECRET_KEY must contain at least 32 characters when auth is enabled."
+                "AUTH_SECRET_KEY must contain at least 32 characters when authentication is enabled."
             )
         if any(origin == "*" for origin in self.CORS_ALLOWED_ORIGINS):
             raise ValueError("CORS_ALLOWED_ORIGINS cannot contain a wildcard origin.")

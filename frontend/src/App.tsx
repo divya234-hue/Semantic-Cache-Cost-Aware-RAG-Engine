@@ -9,6 +9,7 @@ import {
   FileText,
   Gauge,
   LayoutDashboard,
+  LogOut,
   MessageSquareText,
   Moon,
   RefreshCw,
@@ -16,27 +17,31 @@ import {
   ShieldAlert,
   Sparkles,
   Sun,
+  UserRound,
   Zap,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AnswerCard } from './components/AnswerCard'
 import { DocumentList } from './components/DocumentList'
 import { MetricCard } from './components/MetricCard'
-import { getApiErrorMessage, ragApi } from './api'
+import { authApi, getApiErrorMessage, ragApi } from './api'
 import type {
   AskResponse,
+  AuthUser,
   CacheStats,
+  DocumentPermission,
   DocumentInfo,
   DocumentListResponse,
   IngestResponse,
   MetricsSummary,
   SystemSettings,
+  UserCreateInput,
 } from './api'
 import './App.css'
 
-type Page = 'dashboard' | 'documents' | 'chat' | 'system'
+type Page = 'dashboard' | 'documents' | 'chat' | 'system' | 'profile' | 'team'
 type Theme = 'light' | 'dark'
 type MessageStatus = 'loading' | 'answered' | 'failed'
 
@@ -83,7 +88,13 @@ function SettingRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-function App() {
+function Workspace({
+  user,
+  onLogout,
+}: {
+  user: AuthUser
+  onLogout: () => void
+}) {
   const queryClient = useQueryClient()
   const [page, setPage] = useState<Page>('dashboard')
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
@@ -103,6 +114,20 @@ function App() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const [copyError, setCopyError] = useState<string | null>(null)
   const [activity, setActivity] = useState<ActivityItem[]>([])
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [passwordMessage, setPasswordMessage] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [newUserEmail, setNewUserEmail] = useState('')
+  const [newUserName, setNewUserName] = useState('')
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [newUserRole, setNewUserRole] = useState<AuthUser['role']>('EDITOR')
+  const [teamMessage, setTeamMessage] = useState<string | null>(null)
+  const [teamError, setTeamError] = useState<string | null>(null)
+  const [selectedDocument, setSelectedDocument] = useState('')
+  const [selectedPermissionUser, setSelectedPermissionUser] = useState('')
+  const [permissionCanRead, setPermissionCanRead] = useState(false)
+  const [permissionCanEdit, setPermissionCanEdit] = useState(false)
 
   const documentsQuery = useQuery({
     queryKey: ['documents'],
@@ -119,6 +144,7 @@ function App() {
   const settingsQuery = useQuery({
     queryKey: ['settings'],
     queryFn: ragApi.getSettings,
+    enabled: user.role === 'ADMIN',
     retry: false,
     refetchOnWindowFocus: false,
   })
@@ -134,6 +160,26 @@ function App() {
     retry: false,
     refetchOnWindowFocus: false,
   })
+  const teamUsersQuery = useQuery({
+    queryKey: ['team-users'],
+    queryFn: authApi.listUsers,
+    enabled: user.role === 'ADMIN',
+    retry: false,
+  })
+  const documentPermissionsQuery = useQuery({
+    queryKey: ['document-permissions', selectedDocument],
+    queryFn: () => authApi.getDocumentPermissions(selectedDocument),
+    enabled: user.role === 'ADMIN' && Boolean(selectedDocument),
+    retry: false,
+  })
+
+  useEffect(() => {
+    const permission = documentPermissionsQuery.data?.find(
+      (item) => item.user_id === selectedPermissionUser,
+    )
+    setPermissionCanRead(permission?.can_read ?? false)
+    setPermissionCanEdit(permission?.can_edit ?? false)
+  }, [documentPermissionsQuery.data, selectedPermissionUser])
 
   const documents: DocumentListResponse | undefined = documentsQuery.data
   const metrics: MetricsSummary | undefined = metricsQuery.data
@@ -163,7 +209,11 @@ function App() {
         ? 'Documents'
         : page === 'chat'
           ? 'Ask your corpus'
-          : 'System & settings'
+          : page === 'system'
+            ? 'System & settings'
+            : page === 'team'
+              ? 'Team & access'
+              : 'Your profile'
 
   async function refreshDashboard() {
     await Promise.all([
@@ -211,6 +261,31 @@ function App() {
       setUploadProgress(null)
       await refreshDashboard()
       setUploading(false)
+    }
+  }
+
+  async function handleRoleChange(userId: string, role: AuthUser['role']) {
+    setTeamMessage(null)
+    setTeamError(null)
+    try {
+      await authApi.updateUserRole(userId, role)
+      setTeamMessage('User role updated; their active sessions were revoked.')
+      await queryClient.invalidateQueries({ queryKey: ['team-users'] })
+    } catch (error) {
+      setTeamError(getApiErrorMessage(error))
+    }
+  }
+
+  async function handleDeactivateUser(userId: string) {
+    if (!window.confirm('Deactivate this account and revoke its sessions?')) return
+    setTeamMessage(null)
+    setTeamError(null)
+    try {
+      await authApi.deactivateUser(userId)
+      setTeamMessage('User deactivated.')
+      await queryClient.invalidateQueries({ queryKey: ['team-users'] })
+    } catch (error) {
+      setTeamError(getApiErrorMessage(error))
     }
   }
 
@@ -311,6 +386,69 @@ function App() {
     await askQuestion(cleanQuery)
   }
 
+  async function handleChangePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setPasswordMessage(null)
+    setPasswordError(null)
+    try {
+      await authApi.changePassword(currentPassword, newPassword)
+      setCurrentPassword('')
+      setNewPassword('')
+      setPasswordMessage('Password changed. Sign in again with your new password.')
+      onLogout()
+    } catch (error) {
+      setPasswordError(getApiErrorMessage(error))
+    }
+  }
+
+  async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setTeamMessage(null)
+    setTeamError(null)
+    try {
+      const payload: UserCreateInput = {
+        email: newUserEmail,
+        display_name: newUserName,
+        password: newUserPassword,
+        role: newUserRole,
+      }
+      await authApi.createUser(payload)
+      setNewUserEmail('')
+      setNewUserName('')
+      setNewUserPassword('')
+      setTeamMessage('User created in this tenant.')
+      await queryClient.invalidateQueries({ queryKey: ['team-users'] })
+    } catch (error) {
+      setTeamError(getApiErrorMessage(error))
+    }
+  }
+
+  async function handleSavePermissions() {
+    if (!selectedDocument || !selectedPermissionUser) return
+    setTeamMessage(null)
+    setTeamError(null)
+    const permissions: DocumentPermission[] = (
+      documentPermissionsQuery.data ?? []
+    ).filter((permission) => permission.user_id !== selectedPermissionUser)
+    if (permissionCanRead || permissionCanEdit) {
+      permissions.push({
+        user_id: selectedPermissionUser,
+        can_read: permissionCanRead || permissionCanEdit,
+        can_edit: permissionCanEdit,
+      })
+    }
+    try {
+      await authApi.setDocumentPermissions(selectedDocument, permissions)
+      setTeamMessage('Document access updated.')
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['document-permissions', selectedDocument] }),
+        queryClient.invalidateQueries({ queryKey: ['documents'] }),
+      ])
+    } catch (error) {
+      setTeamError(getApiErrorMessage(error))
+    }
+  }
+
   async function copyAnswer(messageId: string, answer: string) {
     try {
       await navigator.clipboard.writeText(answer)
@@ -332,6 +470,7 @@ function App() {
     { id: 'documents', label: 'Documents', icon: FileText },
     { id: 'chat', label: 'Ask your corpus', icon: MessageSquareText },
     { id: 'system', label: 'System & settings', icon: Settings2 },
+    { id: 'team', label: 'Team & access', icon: UserRound },
   ]
 
   return (
@@ -355,7 +494,12 @@ function App() {
 
         <div className="sidebar__label">Workspace</div>
         <nav className="main-nav" aria-label="Main navigation">
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {navItems
+            .filter(({ id }) =>
+              (id !== 'system' || user.role === 'ADMIN') &&
+              (id !== 'team' || user.role === 'ADMIN'),
+            )
+            .map(({ id, label, icon: Icon }) => (
             <button
               className={`nav-link ${page === id ? 'is-active' : ''}`}
               type="button"
@@ -369,21 +513,22 @@ function App() {
                 <span className="nav-count">{documents.total_count}</span>
               )}
             </button>
-          ))}
+            ))}
         </nav>
 
         <div className="sidebar__spacer" />
         <div className="local-notice">
           <ShieldAlert size={16} aria-hidden="true" />
           <div>
-            <strong>Local development UI</strong>
+            <strong>{user.role}</strong>
             <span>
-              {settings?.tenant_auth_enabled
-                ? 'Bearer-token authentication is not managed here.'
-                : 'Development tenant · no login required.'}
+              {user.email}
             </span>
           </div>
         </div>
+        <button className="sidebar-logout" type="button" onClick={onLogout}>
+          <LogOut size={15} /> Sign out
+        </button>
         <div className="sidebar__footer">
           <span className={`status-dot ${readiness === 'ready' ? 'is-ready' : readiness === 'unavailable' ? 'is-offline' : ''}`} />
           <span>
@@ -405,6 +550,15 @@ function App() {
           </div>
           <div className="topbar__actions">
             <span className="environment-badge">{settings?.app_env ?? 'LOCAL'}</span>
+            <button
+              className="profile-button"
+              type="button"
+              onClick={() => setPage('profile')}
+              aria-label="Open your profile"
+            >
+              <UserRound size={15} />
+              <span>{user.display_name}</span>
+            </button>
             <button
               className="icon-button"
               type="button"
@@ -581,6 +735,7 @@ function App() {
               </div>
               <DocumentList
                 documents={documents?.documents ?? []}
+                canManageDocuments={user.role !== 'VIEWER'}
                 loading={loading}
                 error={documentsError}
                 refreshing={refreshing}
@@ -599,6 +754,165 @@ function App() {
               />
               {reindexMessage && <div className="notice notice--success" role="status">{reindexMessage}</div>}
               {reindexError && <div className="notice notice--error" role="alert">{reindexError}</div>}
+            </section>
+          )}
+
+          {page === 'profile' && (
+            <section className="page-section">
+              <div className="page-intro">
+                <div>
+                  <p className="eyebrow">Account</p>
+                  <h1>Your profile</h1>
+                  <p className="page-intro__copy">Manage your account and active session.</p>
+                </div>
+              </div>
+              <section className="panel profile-panel">
+                <dl className="profile-details">
+                  <div><dt>Name</dt><dd>{user.display_name}</dd></div>
+                  <div><dt>Email</dt><dd>{user.email}</dd></div>
+                  <div><dt>Role</dt><dd>{user.role}</dd></div>
+                  <div><dt>Tenant</dt><dd>{user.tenant_id}</dd></div>
+                </dl>
+                <form className="profile-password-form" onSubmit={(event) => void handleChangePassword(event)}>
+                  <h2>Change password</h2>
+                  <label>
+                    Current password
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={currentPassword}
+                      onChange={(event) => setCurrentPassword(event.target.value)}
+                      required
+                    />
+                  </label>
+                  <label>
+                    New password
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={12}
+                      maxLength={128}
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                      required
+                    />
+                  </label>
+                  {passwordMessage && <div className="notice notice--success" role="status">{passwordMessage}</div>}
+                  {passwordError && <div className="notice notice--error" role="alert">{passwordError}</div>}
+                  <button className="button button--primary" type="submit">Update password</button>
+                </form>
+                <button className="button button--secondary" type="button" onClick={onLogout}>Sign out</button>
+              </section>
+            </section>
+          )}
+
+          {page === 'team' && user.role === 'ADMIN' && (
+            <section className="page-section">
+              <div className="page-intro">
+                <div>
+                  <p className="eyebrow">Tenant administration</p>
+                  <h1>Team & access</h1>
+                  <p className="page-intro__copy">Manage tenant accounts and document-level access.</p>
+                </div>
+              </div>
+              {teamMessage && <div className="notice notice--success" role="status">{teamMessage}</div>}
+              {teamError && <div className="notice notice--error" role="alert">{teamError}</div>}
+              <div className="team-grid">
+                <section className="panel team-panel">
+                  <h2>Add a team member</h2>
+                  <form className="profile-password-form" onSubmit={(event) => void handleCreateUser(event)}>
+                    <label>
+                      Name
+                      <input value={newUserName} onChange={(event) => setNewUserName(event.target.value)} maxLength={120} required />
+                    </label>
+                    <label>
+                      Email
+                      <input type="email" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} maxLength={320} required />
+                    </label>
+                    <label>
+                      Temporary password
+                      <input type="password" value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} minLength={12} maxLength={128} required />
+                    </label>
+                    <label>
+                      Role
+                      <select value={newUserRole} onChange={(event) => setNewUserRole(event.target.value as AuthUser['role'])}>
+                        <option value="EDITOR">Editor</option>
+                        <option value="VIEWER">Viewer</option>
+                        <option value="ADMIN">Admin</option>
+                      </select>
+                    </label>
+                    <button className="button button--primary" type="submit">Create user</button>
+                  </form>
+                </section>
+                <section className="panel team-panel">
+                  <h2>Tenant users</h2>
+                  {teamUsersQuery.isLoading ? (
+                    <div className="state-card" role="status">Loading users…</div>
+                  ) : teamUsersQuery.error ? (
+                    <div className="notice notice--error" role="alert">{getApiErrorMessage(teamUsersQuery.error)}</div>
+                  ) : (
+                    <ul className="team-user-list">
+                      {(teamUsersQuery.data ?? []).map((member) => (
+                        <li key={member.id}>
+                          <span><strong>{member.display_name}</strong><small>{member.email}{member.is_active ? '' : ' · inactive'}</small></span>
+                          <select
+                            aria-label={`Role for ${member.email}`}
+                            value={member.role}
+                            disabled={!member.is_active}
+                            onChange={(event) => void handleRoleChange(member.id, event.target.value as AuthUser['role'])}
+                          >
+                            <option value="ADMIN">Admin</option>
+                            <option value="EDITOR">Editor</option>
+                            <option value="VIEWER">Viewer</option>
+                          </select>
+                          {member.id !== user.id && member.is_active && (
+                            <button className="text-action" type="button" onClick={() => void handleDeactivateUser(member.id)}>
+                              Deactivate
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
+              <section className="panel team-panel document-access-panel">
+                <h2>Document access</h2>
+                <p className="panel-description">Grant read or edit access to active users in this tenant. Owners and admins retain their existing permissions.</p>
+                <div className="team-access-controls">
+                  <label>
+                    Document
+                    <select value={selectedDocument} onChange={(event) => setSelectedDocument(event.target.value)}>
+                      <option value="">Choose a document</option>
+                      {(documents?.documents ?? []).map((document) => (
+                        <option key={document.path} value={document.path}>{document.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    User
+                    <select value={selectedPermissionUser} onChange={(event) => setSelectedPermissionUser(event.target.value)}>
+                      <option value="">Choose a user</option>
+                      {(teamUsersQuery.data ?? []).filter((member) => member.is_active && member.id !== user.id).map((member) => (
+                        <option key={member.id} value={member.id}>{member.display_name} · {member.role}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {selectedDocument && selectedPermissionUser && (
+                  <div className="team-permission-controls">
+                    {documentPermissionsQuery.isLoading ? (
+                      <span role="status">Loading permissions…</span>
+                    ) : (
+                      <>
+                        <label><input type="checkbox" checked={permissionCanRead} onChange={(event) => { setPermissionCanRead(event.target.checked); if (!event.target.checked) setPermissionCanEdit(false) }} /> Read</label>
+                        <label><input type="checkbox" checked={permissionCanEdit} onChange={(event) => { setPermissionCanEdit(event.target.checked); if (event.target.checked) setPermissionCanRead(true) }} /> Edit</label>
+                        <button className="button button--secondary" type="button" onClick={() => void handleSavePermissions()} disabled={documentPermissionsQuery.isLoading}>Save access</button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </section>
             </section>
           )}
 
@@ -827,9 +1141,7 @@ function App() {
                 <div className="notice notice--warning auth-notice">
                   <ShieldAlert size={17} />
                   <span>
-                    {settings?.tenant_auth_enabled
-                      ? 'This UI cannot attach bearer tokens. Tenant-authenticated deployments require an API client configured for your identity provider.'
-                      : 'Authentication is disabled only for local development. This interface does not provide user accounts or frontend-only security.'}
+                    Your account is protected by secure, HttpOnly session cookies. The API enforces role and document permissions.
                   </span>
                 </div>
               </div>
@@ -838,6 +1150,176 @@ function App() {
         </div>
       </main>
     </div>
+  )
+}
+
+function AuthPage({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
+  const [registering, setRegistering] = useState(false)
+  const [email, setEmail] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [tenantName, setTenantName] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setSubmitting(true)
+    try {
+      const user = registering
+        ? await authApi.register({
+            email,
+            display_name: displayName,
+            tenant_name: tenantName,
+            password,
+          })
+        : await authApi.login(email, password)
+      onAuthenticated(user)
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card">
+        <div className="auth-brand"><BookOpen size={20} /><span>RAG Studio</span></div>
+        <p className="eyebrow">{registering ? 'Create workspace' : 'Welcome back'}</p>
+        <h1>{registering ? 'Create your account' : 'Sign in'}</h1>
+        <p className="page-intro__copy">
+          {registering
+            ? 'Your account starts a new private tenant workspace.'
+            : 'Sign in to access your tenant workspace.'}
+        </p>
+        <form className="auth-form" onSubmit={(event) => void submit(event)}>
+          {registering && (
+            <>
+              <label>
+                Your name
+                <input
+                  type="text"
+                  autoComplete="name"
+                  maxLength={120}
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  required
+                />
+              </label>
+              <label>
+                Workspace name
+                <input
+                  type="text"
+                  maxLength={120}
+                  value={tenantName}
+                  onChange={(event) => setTenantName(event.target.value)}
+                  required
+                />
+              </label>
+            </>
+          )}
+          <label>
+            Email
+            <input
+              type="email"
+              autoComplete="email"
+              maxLength={320}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              autoComplete={registering ? 'new-password' : 'current-password'}
+              minLength={registering ? 12 : undefined}
+              maxLength={128}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+            {registering && <small>Use at least 12 characters.</small>}
+          </label>
+          {error && <div className="notice notice--error" role="alert">{error}</div>}
+          <button className="button button--primary auth-submit" type="submit" disabled={submitting}>
+            {submitting ? 'Please wait…' : registering ? 'Create private workspace' : 'Sign in'}
+          </button>
+        </form>
+        <p className="auth-switch">
+          {registering ? 'Already have an account?' : 'New to RAG Studio?'}
+          {' '}
+          <button
+            type="button"
+            onClick={() => {
+              setError(null)
+              setRegistering(!registering)
+            }}
+          >
+            {registering ? 'Sign in' : 'Create an account'}
+          </button>
+        </p>
+      </section>
+    </main>
+  )
+}
+
+function App() {
+  const queryClient = useQueryClient()
+  const userQuery = useQuery<AuthUser | null>({
+    queryKey: ['auth-user'],
+    queryFn: async () => authApi.me(),
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+
+  useEffect(() => {
+    const handleExpired = () => queryClient.setQueryData(['auth-user'], null)
+    window.addEventListener('rag-session-expired', handleExpired)
+    return () => window.removeEventListener('rag-session-expired', handleExpired)
+  }, [queryClient])
+
+  if (userQuery.isLoading) {
+    return <main className="auth-page"><div className="state-card"><span className="loader" />Checking session…</div></main>
+  }
+  if (userQuery.data) {
+    return (
+      <Workspace
+        user={userQuery.data}
+        onLogout={() => {
+          void authApi.logout().catch(() => undefined).finally(() => {
+            queryClient.clear()
+            queryClient.setQueryData(['auth-user'], null)
+          })
+        }}
+      />
+    )
+  }
+  const authStatus = (
+    userQuery.error as { response?: { status?: number } } | null
+  )?.response?.status
+  if (userQuery.error && authStatus !== 401) {
+    return (
+      <main className="auth-page">
+        <section className="auth-card">
+          <h1>Unable to reach the authentication service</h1>
+          <p className="page-intro__copy">{getApiErrorMessage(userQuery.error)}</p>
+          <button className="button button--primary" type="button" onClick={() => void userQuery.refetch()}>
+            Try again
+          </button>
+        </section>
+      </main>
+    )
+  }
+  return (
+    <AuthPage
+      onAuthenticated={(user) => {
+        queryClient.setQueryData(['auth-user'], user)
+      }}
+    />
   )
 }
 

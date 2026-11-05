@@ -6,6 +6,36 @@ export interface DocumentInfo {
   size_bytes: number
   extension: string
   modified_at: string
+  can_edit?: boolean
+}
+
+export interface AuthUser {
+  id: string
+  email: string
+  display_name: string
+  tenant_id: string
+  role: 'ADMIN' | 'EDITOR' | 'VIEWER'
+  is_active?: boolean
+}
+
+export interface RegisterInput {
+  email: string
+  display_name: string
+  tenant_name: string
+  password: string
+}
+
+export interface UserCreateInput {
+  email: string
+  display_name: string
+  password: string
+  role: AuthUser['role']
+}
+
+export interface DocumentPermission {
+  user_id: string
+  can_read: boolean
+  can_edit: boolean
 }
 
 export interface DocumentListResponse {
@@ -110,7 +140,124 @@ export interface HealthResponse {
 
 const client = axios.create({
   timeout: 30_000,
+  withCredentials: true,
 })
+
+function getCsrfToken(): string | null {
+  const cookie = document.cookie
+    .split('; ')
+    .find((part) => part.startsWith('csrf_token=') || part.startsWith('__Host-csrf_token='))
+  if (!cookie) return null
+  const separator = cookie.indexOf('=')
+  return decodeURIComponent(cookie.slice(separator + 1))
+}
+
+declare module 'axios' {
+  interface InternalAxiosRequestConfig {
+    authRetry?: boolean
+  }
+}
+
+let refreshRequest: Promise<void> | null = null
+
+client.interceptors.request.use((config) => {
+  if (['post', 'put', 'patch', 'delete'].includes(config.method?.toLowerCase() ?? '')) {
+    const csrfToken = getCsrfToken()
+    if (csrfToken) config.headers.set('X-CSRF-Token', csrfToken)
+  }
+  return config
+})
+
+client.interceptors.response.use(
+  (response) => response,
+  async (error: unknown) => {
+    if (!axios.isAxiosError(error)) return Promise.reject(error)
+    const config = error.config
+    const url = config?.url ?? ''
+    const authEndpoint = [
+      '/auth/login',
+      '/auth/register',
+      '/auth/refresh',
+      '/auth/logout',
+    ].some((endpoint) => url.startsWith(endpoint))
+    if (
+      error.response?.status !== 401 ||
+      !config ||
+      config.authRetry ||
+      authEndpoint
+    ) {
+      return Promise.reject(error)
+    }
+
+    config.authRetry = true
+    try {
+      refreshRequest ??= client
+        .post('/auth/refresh')
+        .then(() => undefined)
+        .finally(() => {
+          refreshRequest = null
+        })
+      await refreshRequest
+      return client(config)
+    } catch {
+      window.dispatchEvent(new Event('rag-session-expired'))
+      return Promise.reject(error)
+    }
+  },
+)
+
+export const authApi = {
+  async me(): Promise<AuthUser> {
+    return (await client.get<AuthUser>('/auth/me')).data
+  },
+  async login(email: string, password: string): Promise<AuthUser> {
+    const body = new URLSearchParams({ username: email, password })
+    return (
+      await client.post<AuthUser>('/auth/login', body, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      })
+    ).data
+  },
+  async register(payload: RegisterInput): Promise<AuthUser> {
+    return (await client.post<AuthUser>('/auth/register', payload)).data
+  },
+  async logout(): Promise<void> {
+    await client.post('/auth/logout')
+  },
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await client.post('/auth/change-password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    })
+  },
+  async listUsers(): Promise<AuthUser[]> {
+    return (await client.get<{ users: AuthUser[] }>('/auth/users')).data.users
+  },
+  async createUser(payload: UserCreateInput): Promise<AuthUser> {
+    return (await client.post<AuthUser>('/auth/users', payload)).data
+  },
+  async updateUserRole(userId: string, role: AuthUser['role']): Promise<AuthUser> {
+    return (await client.patch<AuthUser>(`/auth/users/${encodeURIComponent(userId)}/role`, { role })).data
+  },
+  async deactivateUser(userId: string): Promise<void> {
+    await client.delete(`/auth/users/${encodeURIComponent(userId)}`)
+  },
+  async getDocumentPermissions(filename: string): Promise<DocumentPermission[]> {
+    return (
+      await client.get<{ permissions: DocumentPermission[] }>(
+        `/api/v1/documents/${encodeURIComponent(filename)}/permissions`,
+      )
+    ).data.permissions
+  },
+  async setDocumentPermissions(
+    filename: string,
+    permissions: DocumentPermission[],
+  ): Promise<void> {
+    await client.put(`/api/v1/documents/${encodeURIComponent(filename)}/permissions`, {
+      permissions,
+    })
+  },
+}
 
 export const ragApi = {
   async getReadiness(): Promise<HealthResponse> {
