@@ -2,7 +2,7 @@
 
 A local-development Retrieval-Augmented Generation (RAG) application with a FastAPI backend and a React + TypeScript frontend. It supports document upload and indexing, tenant-scoped retrieval and citations, a Qdrant-backed semantic answer cache, and optional answer-provider routing.
 
-> **Project status:** This is a tested prototype suitable for learning, portfolio demonstrations, and local experimentation. It is **not production-ready**. Review the [security notes](#security-and-authentication) and [known limitations](#known-limitations) before exposing it to other users or networks.
+> **Project status:** This is a tested prototype suitable for learning, portfolio demonstrations, and local experimentation. It is **not production ready
 
 ## Features
 
