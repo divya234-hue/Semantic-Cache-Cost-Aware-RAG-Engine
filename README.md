@@ -68,7 +68,6 @@ Start the backend bound to loopback:
 ```powershell
 uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
-
 The first ingestion may take longer while the embedding model is downloaded and loaded.
 
 ### 2. Install and run the frontend
