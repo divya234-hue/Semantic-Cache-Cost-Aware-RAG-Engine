@@ -34,14 +34,12 @@ FastAPI
 In local development, the Vite server proxies API and health requests to `http://127.0.0.1:8000`. Browser authentication uses HttpOnly cookies; access and refresh tokens are not returned in JSON or stored in `localStorage`.
 
 ## Requirements
-
 - Python 3.12 or newer.
 - Node.js and npm versions compatible with the Vite version in `frontend/package.json`.
 - Disk space and, on first use, network access to download the configured Sentence Transformers embedding model. The default model is `sentence-transformers/all-MiniLM-L6-v2`.
 - No separate Qdrant server is needed for the default local configuration; embedded Qdrant data is stored under the configured local path.
 
 ## Run locally
-
 Run these commands from the repository root in PowerShell.
 
 ### 1. Configure and install the backend
@@ -52,8 +50,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
-```
-
+'''
 The example configuration enables built-in authentication with local Qdrant storage and the local extractive answer provider. Before starting the app, set a private signing key and apply the database migration:
 
 ```powershell
